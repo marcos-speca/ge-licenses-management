@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Service account credentials & keys
+service_account_key.json
+*.json
+
+# Local user license mappings/backups
+user_licenses.txt
+user_licenses.txt.bak
+*.txt
+*.bak
