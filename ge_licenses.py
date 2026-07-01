@@ -70,12 +70,36 @@ def get_project_number(project_id):
         return ""
 
 
-def load_emails_from_file(filepath):
+def get_active_subscription_paths(args):
+    """Returns a set of active subscription config names (resource paths)."""
+    token = get_access_token()
+    url = (
+        f"https://{args.endpoint_location}-discoveryengine.googleapis.com/v1/"
+        f"projects/{args.project_id}/locations/{args.location}/licenseConfigs"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Goog-User-Project": args.project_id
+    }
+    try:
+        response = make_api_request(url, headers, method="GET")
+        configs = response.get("licenseConfigs", [])
+        return {c.get("name") for c in configs if c.get("state") == "ACTIVE"}
+    except Exception as e:
+        print(f"Warning: Failed to fetch active subscription configs: {e}", file=sys.stderr)
+        return set()
+
+
+def load_emails_from_file(filepath, only_unassigned=False, active_configs=None):
     """Reads email addresses from a file. Supports both raw lists and CSV formats (user_licenses.txt)."""
     if not os.path.exists(filepath):
         print(f"Error: File '{filepath}' not found.", file=sys.stderr)
         sys.exit(1)
     
+    if only_unassigned and active_configs is None:
+        active_configs = set()
+        
     emails = []
     with open(filepath, "r", encoding="utf-8") as f:
         first_line = True
@@ -93,9 +117,15 @@ def load_emails_from_file(filepath):
             # Handle CSV split
             parts = line_str.split(",")
             email = parts[0].strip()
+            config = parts[1].strip() if len(parts) > 1 else ""
             
             if email and "@" in email:
-                emails.append(email)
+                if only_unassigned:
+                    is_active = config in active_configs
+                    if not is_active:
+                        emails.append(email)
+                else:
+                    emails.append(email)
     return emails
 
 
@@ -773,6 +803,17 @@ def list_licenses(args):
     print("-" * 80)
 
 
+def cleanup_temp_files(filepath="user_licenses.txt"):
+    """Removes temporary user licenses files if they exist."""
+    for path in [filepath, filepath + ".bak"]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"Removed temporary file '{path}'")
+            except Exception as e:
+                print(f"Warning: Failed to remove temporary file '{path}': {e}", file=sys.stderr)
+
+
 def interactive_menu():
     """Displays interactive CLI menu loop for GE License management."""
     print("=" * 80)
@@ -810,198 +851,223 @@ def interactive_menu():
     args.batch_size = 100
     args.project_number = project_num
 
-    # Step 1: Prompt before auto-updating user_licenses.txt
-    sync_choice = input("Do you want to sync 'user_licenses.txt' with live GCP data first? (y/n) [default: y]: ").strip().lower()
-    if sync_choice != "n":
+    print("\nWarning: A local temporary file 'user_licenses.txt' will be created during this session and deleted upon exit.")
+    proceed = input("Do you want to proceed? (y/n) [default: y]: ").strip().lower()
+    if proceed == "n":
+        return
+
+    try:
+        print("\nSynchronizing user database with live GCP data...")
         auto_update_licenses_file(args, filepath="user_licenses.txt")
-    else:
-        print("Using local 'user_licenses.txt' file mapping.")
 
-    while True:
-        print("\nSelect an action:")
-        print("1. Batch Assign Licenses")
-        print("2. Batch Unassign Licenses")
-        print("3. Migrate Subscriptions (Contract Changed)")
-        print("4. Manage Project Allocations (Distribute/Retract)")
-        print("5. Exit")
+        while True:
+            print("\nSelect an action:")
+            print("1. Batch Assign Licenses")
+            print("2. Batch Unassign Licenses")
+            print("3. Migrate Subscriptions (Contract Changed)")
+            print("4. Manage Project Allocations (Distribute/Retract)")
+            print("5. Exit")
 
-        choice = input("Enter choice (1-5): ").strip()
+            choice = input("Enter choice (1-5): ").strip()
 
-        if choice == "1":
-            print("\n--- Batch Assign Licenses ---")
-            list_subscriptions_with_availability(args)
+            if choice == "1":
+                print("\n--- Batch Assign Licenses ---")
+                list_subscriptions_with_availability(args)
 
-            if project_num:
-                print(f"Project Number (auto-discovered): {project_num}")
-                selected_project_num = project_num
-            else:
-                selected_project_num = input("Enter GCP Project Number: ").strip()
-                if not selected_project_num:
-                    print("Error: Project Number is required.")
+                if project_num:
+                    print(f"Project Number (auto-discovered): {project_num}")
+                    selected_project_num = project_num
+                else:
+                    selected_project_num = input("Enter GCP Project Number: ").strip()
+                    if not selected_project_num:
+                        print("Error: Project Number is required.")
+                        continue
+                    if not selected_project_num.isdigit():
+                        print("Error: Project Number must be numeric.")
+                        continue
+
+                sub_id = input("Enter Subscription ID to assign: ").strip()
+                if not sub_id:
+                    print("Error: Subscription ID is required.")
                     continue
-                if not selected_project_num.isdigit():
-                    print("Error: Project Number must be numeric.")
+
+                args.project_number = selected_project_num
+                args.subscription_id = sub_id
+
+                email_mode = input("Select email input: (1) Typed list, (2) Load from file: ").strip()
+                emails = []
+                if email_mode == "1":
+                    emails_input = input("Enter comma-separated email list: ").strip()
+                    emails = [e.strip() for e in emails_input.split(",") if e.strip()]
+                elif email_mode == "2":
+                    file_path = input("Enter path to emails file [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
+                    
+                    # Fetch active configs to determine assignment status
+                    active_configs = get_active_subscription_paths(args)
+                    all_emails = load_emails_from_file(file_path)
+                    unassigned_emails = load_emails_from_file(file_path, only_unassigned=True, active_configs=active_configs)
+                    
+                    if len(unassigned_emails) < len(all_emails):
+                        assigned_count = len(all_emails) - len(unassigned_emails)
+                        print(f"\nFound {len(all_emails)} users in file:")
+                        print(f"  - {assigned_count} are already assigned to active subscriptions.")
+                        print(f"  - {len(unassigned_emails)} are unassigned or assigned to expired subscriptions.")
+                        
+                        print("\nSelect whom to assign:")
+                        print(f"1. Only unassigned/expired users ({len(unassigned_emails)} users) [default]")
+                        print(f"2. All users ({len(all_emails)} users)")
+                        sub_choice = input("Enter choice (1-2): ").strip()
+                        if sub_choice == "2":
+                            emails = all_emails
+                        else:
+                            emails = unassigned_emails
+                    else:
+                        emails = all_emails
+
+                if not emails:
+                    print("Error: No emails provided.")
                     continue
 
-            sub_id = input("Enter Subscription ID to assign: ").strip()
-            if not sub_id:
-                print("Error: Subscription ID is required.")
-                continue
-
-            args.project_number = selected_project_num
-            args.subscription_id = sub_id
-
-            email_mode = input("Select email input: (1) Typed list, (2) Load from file: ").strip()
-            emails = []
-            if email_mode == "1":
-                emails_input = input("Enter comma-separated email list: ").strip()
-                emails = [e.strip() for e in emails_input.split(",") if e.strip()]
-            elif email_mode == "2":
-                file_path = input("Enter path to emails file [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
-                emails = load_emails_from_file(file_path)
-
-            if not emails:
-                print("Error: No emails provided.")
-                continue
-
-            assign_licenses(args, emails)
-            # Update licenses.txt automatically after changes
-            auto_update_licenses_file(args)
-
-        elif choice == "2":
-            print("\n--- Batch Unassign Licenses ---")
-            email_mode = input("Select email input: (1) Typed list, (2) Load from file: ").strip()
-            emails = []
-            if email_mode == "1":
-                emails_input = input("Enter comma-separated email list: ").strip()
-                emails = [e.strip() for e in emails_input.split(",") if e.strip()]
-            elif email_mode == "2":
-                file_path = input("Enter path to emails file [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
-                emails = load_emails_from_file(file_path)
-
-            if not emails:
-                print("Error: No emails provided.")
-                continue
-
-            confirm = input(f"Are you sure you want to unassign licenses from {len(emails)} users? (y/n): ").strip().lower()
-            if confirm == "y":
-                unassign_licenses(args, emails)
+                assign_licenses(args, emails)
                 # Update licenses.txt automatically after changes
                 auto_update_licenses_file(args)
-            else:
-                print("Unassignment cancelled.")
 
-        elif choice == "3":
-            print("\n--- Migrate Subscriptions (Contract Changed) ---")
-            print("This option updates user assignments from an old Subscription ID to a new one using local database mappings.")
+            elif choice == "2":
+                print("\n--- Batch Unassign Licenses ---")
+                email_mode = input("Select email input: (1) Typed list, (2) Load from file: ").strip()
+                emails = []
+                if email_mode == "1":
+                    emails_input = input("Enter comma-separated email list: ").strip()
+                    emails = [e.strip() for e in emails_input.split(",") if e.strip()]
+                elif email_mode == "2":
+                    file_path = input("Enter path to emails file [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
+                    emails = load_emails_from_file(file_path)
 
-            old_sub = input("Enter Old Subscription ID (to migrate users from): ").strip()
-            if not old_sub:
-                print("Error: Old Subscription ID is required.")
-                continue
-
-            new_sub = input("Enter New Subscription ID (to migrate users to): ").strip()
-            if not new_sub:
-                print("Error: New Subscription ID is required.")
-                continue
-
-            file_path = input("Enter path to emails file containing mappings [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
-
-            if project_num:
-                args.project_number = project_num
-            else:
-                selected_project_num = input("Enter GCP Project Number: ").strip()
-                if not selected_project_num or not selected_project_num.isdigit():
-                    print("Error: Valid GCP Project Number is required.")
+                if not emails:
+                    print("Error: No emails provided.")
                     continue
-                args.project_number = selected_project_num
 
-            args.old_subscription_id = old_sub
-            args.new_subscription_id = new_sub
-            args.emails_file = file_path
-
-            migrate_licenses(args)
-
-        elif choice == "4":
-            while True:
-                print("\n--- Manage Project Allocations ---")
-                print("1. List Billing Account Subscriptions & Distributions")
-                print("2. Distribute Licenses to a Project")
-                print("3. Retract Licenses from a Project")
-                print("4. Return to Main Menu")
-
-                alloc_choice = input("Enter choice (1-4): ").strip()
-                if alloc_choice == "1":
-                    billing_acct = input("Enter Google Cloud Billing Account ID (e.g. 012345-6789AB-CDEF01): ").strip()
-                    if not billing_acct:
-                        print("Error: Billing Account ID is required.")
-                        continue
-                    args.billing_account_id = billing_acct
-                    list_billing_subscriptions(args)
-                elif alloc_choice == "2":
-                    billing_acct = input("Enter Google Cloud Billing Account ID: ").strip()
-                    if not billing_acct:
-                        print("Error: Billing Account ID is required.")
-                        continue
-                    billing_config = input("Enter Billing License Config ID: ").strip()
-                    if not billing_config:
-                        print("Error: Billing License Config ID is required.")
-                        continue
-
-                    target_proj = input(f"Enter Target Project ID [default: {project_id}]: ").strip() or project_id
-                    license_count_str = input("Enter number of licenses to distribute: ").strip()
-                    if not license_count_str.isdigit():
-                        print("Error: License count must be a numeric value.")
-                        continue
-
-                    # Optional license config ID
-                    opt_sub_id = input("Enter existing project License Config ID (optional, hit Enter to create new): ").strip()
-
-                    args.billing_account_id = billing_acct
-                    args.billing_license_config_id = billing_config
-                    args.target_project_id = target_proj
-                    args.license_count = int(license_count_str)
-                    args.subscription_id = opt_sub_id if opt_sub_id else None
-
-                    distribute_licenses(args)
-                elif alloc_choice == "3":
-                    billing_acct = input("Enter Google Cloud Billing Account ID: ").strip()
-                    if not billing_acct:
-                        print("Error: Billing Account ID is required.")
-                        continue
-                    billing_config = input("Enter Billing License Config ID: ").strip()
-                    if not billing_config:
-                        print("Error: Billing License Config ID is required.")
-                        continue
-
-                    target_proj = input(f"Enter Target Project ID [default: {project_id}]: ").strip() or project_id
-                    opt_sub_id = input("Enter project License Config ID (required): ").strip()
-                    if not opt_sub_id:
-                        print("Error: Project License Config ID is required.")
-                        continue
-
-                    license_count_str = input("Enter number of licenses to retract: ").strip()
-                    if not license_count_str.isdigit():
-                        print("Error: License count must be a numeric value.")
-                        continue
-
-                    args.billing_account_id = billing_acct
-                    args.billing_license_config_id = billing_config
-                    args.target_project_id = target_proj
-                    args.subscription_id = opt_sub_id
-                    args.license_count = int(license_count_str)
-
-                    retract_licenses(args)
-                elif alloc_choice == "4":
-                    break
+                confirm = input(f"Are you sure you want to unassign licenses from {len(emails)} users? (y/n): ").strip().lower()
+                if confirm == "y":
+                    unassign_licenses(args, emails)
+                    # Update licenses.txt automatically after changes
+                    auto_update_licenses_file(args)
                 else:
-                    print("Invalid choice. Please select 1, 2, 3, or 4.")
+                    print("Unassignment cancelled.")
 
-        elif choice == "5":
-            print("\nExiting. Goodbye!")
-            break
-        else:
-            print("Invalid choice. Please select 1, 2, 3, 4, or 5.")
+            elif choice == "3":
+                print("\n--- Migrate Subscriptions (Contract Changed) ---")
+                print("This option updates user assignments from an old Subscription ID to a new one using local database mappings.")
+
+                old_sub = input("Enter Old Subscription ID (to migrate users from): ").strip()
+                if not old_sub:
+                    print("Error: Old Subscription ID is required.")
+                    continue
+
+                new_sub = input("Enter New Subscription ID (to migrate users to): ").strip()
+                if not new_sub:
+                    print("Error: New Subscription ID is required.")
+                    continue
+
+                file_path = input("Enter path to emails file containing mappings [default: user_licenses.txt]: ").strip() or "user_licenses.txt"
+
+                if project_num:
+                    args.project_number = project_num
+                else:
+                    selected_project_num = input("Enter GCP Project Number: ").strip()
+                    if not selected_project_num or not selected_project_num.isdigit():
+                        print("Error: Valid GCP Project Number is required.")
+                        continue
+                    args.project_number = selected_project_num
+
+                args.old_subscription_id = old_sub
+                args.new_subscription_id = new_sub
+                args.emails_file = file_path
+
+                migrate_licenses(args)
+
+            elif choice == "4":
+                while True:
+                    print("\n--- Manage Project Allocations ---")
+                    print("1. List Billing Account Subscriptions & Distributions")
+                    print("2. Distribute Licenses to a Project")
+                    print("3. Retract Licenses from a Project")
+                    print("4. Return to Main Menu")
+
+                    alloc_choice = input("Enter choice (1-4): ").strip()
+                    if alloc_choice == "1":
+                        billing_acct = input("Enter Google Cloud Billing Account ID (e.g. 012345-6789AB-CDEF01): ").strip()
+                        if not billing_acct:
+                            print("Error: Billing Account ID is required.")
+                            continue
+                        args.billing_account_id = billing_acct
+                        list_billing_subscriptions(args)
+                    elif alloc_choice == "2":
+                        billing_acct = input("Enter Google Cloud Billing Account ID: ").strip()
+                        if not billing_acct:
+                            print("Error: Billing Account ID is required.")
+                            continue
+                        billing_config = input("Enter Billing License Config ID: ").strip()
+                        if not billing_config:
+                            print("Error: Billing License Config ID is required.")
+                            continue
+
+                        target_proj = input(f"Enter Target Project ID [default: {project_id}]: ").strip() or project_id
+                        license_count_str = input("Enter number of licenses to distribute: ").strip()
+                        if not license_count_str.isdigit():
+                            print("Error: License count must be a numeric value.")
+                            continue
+
+                        # Optional license config ID
+                        opt_sub_id = input("Enter existing project License Config ID (optional, hit Enter to create new): ").strip()
+
+                        args.billing_account_id = billing_acct
+                        args.billing_license_config_id = billing_config
+                        args.target_project_id = target_proj
+                        args.license_count = int(license_count_str)
+                        args.subscription_id = opt_sub_id if opt_sub_id else None
+
+                        distribute_licenses(args)
+                    elif alloc_choice == "3":
+                        billing_acct = input("Enter Google Cloud Billing Account ID: ").strip()
+                        if not billing_acct:
+                            print("Error: Billing Account ID is required.")
+                            continue
+                        billing_config = input("Enter Billing License Config ID: ").strip()
+                        if not billing_config:
+                            print("Error: Billing License Config ID is required.")
+                            continue
+
+                        target_proj = input(f"Enter Target Project ID [default: {project_id}]: ").strip() or project_id
+                        opt_sub_id = input("Enter project License Config ID (required): ").strip()
+                        if not opt_sub_id:
+                            print("Error: Project License Config ID is required.")
+                            continue
+
+                        license_count_str = input("Enter number of licenses to retract: ").strip()
+                        if not license_count_str.isdigit():
+                            print("Error: License count must be a numeric value.")
+                            continue
+
+                        args.billing_account_id = billing_acct
+                        args.billing_license_config_id = billing_config
+                        args.target_project_id = target_proj
+                        args.subscription_id = opt_sub_id
+                        args.license_count = int(license_count_str)
+
+                        retract_licenses(args)
+                    elif alloc_choice == "4":
+                        break
+                    else:
+                        print("Invalid choice. Please select 1, 2, 3, or 4.")
+
+            elif choice == "5":
+                print("\nExiting. Goodbye!")
+                break
+            else:
+                print("Invalid choice. Please select 1, 2, 3, 4, or 5.")
+    finally:
+        cleanup_temp_files("user_licenses.txt")
 
 
 def main():
@@ -1081,6 +1147,11 @@ def main():
         default=100,
         help="Number of users to process in each API request batch (default: 100)."
     )
+    parser.add_argument(
+        "--only-unassigned",
+        action="store_true",
+        help="Only assign to users who do not already have an active license."
+    )
 
     args = parser.parse_args()
 
@@ -1090,7 +1161,8 @@ def main():
         if args.emails:
             emails.extend([e.strip() for e in args.emails.split(",") if e.strip()])
         if args.emails_file:
-            emails.extend(load_emails_from_file(args.emails_file))
+            active_configs = get_active_subscription_paths(args) if (args.action == "assign" and args.only_unassigned) else None
+            emails.extend(load_emails_from_file(args.emails_file, only_unassigned=(args.action == "assign" and args.only_unassigned), active_configs=active_configs))
 
         if not emails:
             parser.error("You must specify either --emails or --emails-file.")

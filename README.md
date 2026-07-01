@@ -21,12 +21,12 @@ Google Cloud Shell has the Google Cloud SDK (`gcloud`), Python 3, and Git pre-in
 1. Open **Google Cloud Shell** from the GCP Console.
 2. Clone this repository:
    ```bash
-   git clone <REPOSITORY_URL>
-   cd ge_licenses_management
+   git clone https://github.com/marcos-speca/ge-licenses-management.git
+   cd ge-licenses-management
    ```
 3. Run the script directly (it is already authenticated):
    ```bash
-   python3 ge_licenses.py --project-id YOUR_PROJECT_ID --interactive
+   python3 ge_licenses.py
    ```
 
 ---
@@ -35,7 +35,10 @@ Google Cloud Shell has the Google Cloud SDK (`gcloud`), Python 3, and Git pre-in
 
 The script does not require exporting local Service Account JSON keys. It utilizes the active authenticated session from your local CLI (`gcloud`) by executing `gcloud auth print-access-token` automatically in the background to retrieve OAuth 2.0 access tokens.
 
-To authenticate your terminal before running the script:
+> [!NOTE]
+> If you are running the script inside **Google Cloud Shell**, you do not need to execute `gcloud auth login`. Google Cloud Shell is automatically authenticated with your active GCP console session.
+
+To authenticate your local terminal before running the script:
 ```bash
 gcloud auth login
 ```
@@ -51,35 +54,51 @@ gcloud auth activate-service-account --key-file=YOUR_KEY.json
 The utility can be run in interactive mode (guided console menu) or using direct CLI command line arguments.
 
 ### 1. Interactive Mode (Recommended)
-To start the guided terminal menu for step-by-step operations:
+To start the guided terminal menu for step-by-step operations, run without arguments:
 ```bash
-python3 ge_licenses.py --project-id YOUR_PROJECT_ID --interactive
+python3 ge_licenses.py
 ```
+> [!WARNING]
+> Upon startup, the interactive mode will warn you that a local temporary cache file `user_licenses.txt` will be created during the session and deleted upon exit. You will be prompted to confirm if you want to proceed.
+
+If you choose to proceed, the script will automatically synchronize the active license assignments from GCP to the local temporary cache file. When exiting the interactive mode (or if the script is interrupted), this temporary file and its backup will be deleted to keep your workspace clean.
+
+If you load users from `user_licenses.txt` for a batch assignment and some users already have active licenses, the script will automatically ask whether you want to assign only to unassigned/expired users or to everyone.
 
 ### 2. Direct CLI Commands
 
-#### List Subscriptions (Contracts) and Assignments
-Lists all subscriptions in the project (IDs, tiers, limits, assigned/available seats, and expiration dates) along with user assignments:
+#### List User License Assignments
+Lists all users in the store and their currently assigned subscriptions:
 ```bash
-python3 ge_licenses.py --project-id YOUR_PROJECT_ID list
+python3 ge_licenses.py --action list --project-id YOUR_PROJECT_ID
 ```
 
-#### Sync Local Mappings File (`user_licenses.txt`)
-Fetches all active license assignments from the GCP project and saves them locally to `user_licenses.txt` to act as a backup or input file:
+#### List Subscriptions (Contracts) and Availability
+Lists all active/expired subscription configurations, limits, assigned seats, and available seats:
 ```bash
-python3 ge_licenses.py --project-id YOUR_PROJECT_ID sync
+python3 ge_licenses.py --action list-subscriptions --project-id YOUR_PROJECT_ID
 ```
 
-#### Batch Assign/Distribute Licenses
+#### Batch Assign Licenses
 Assigns a specific subscription license config to all email addresses listed in a local text file:
 ```bash
-python3 ge_licenses.py --project-id YOUR_PROJECT_ID distribute --subscription-id SUBSCRIPTION_ID --emails-file user_licenses.txt
+python3 ge_licenses.py --action assign --project-id YOUR_PROJECT_ID --subscription-id SUBSCRIPTION_ID --emails-file user_licenses.txt
+```
+To only assign licenses to users who **do not** already have an active license assigned, add the `--only-unassigned` flag:
+```bash
+python3 ge_licenses.py --action assign --project-id YOUR_PROJECT_ID --subscription-id SUBSCRIPTION_ID --emails-file user_licenses.txt --only-unassigned
 ```
 
-#### Batch Remove/Retract Licenses
+#### Batch Unassign Licenses
 Removes licenses for all email addresses listed in the local text file (without deleting the users from the store):
 ```bash
-python3 ge_licenses.py --project-id YOUR_PROJECT_ID retract --emails-file user_licenses.txt
+python3 ge_licenses.py --action unassign --project-id YOUR_PROJECT_ID --emails-file user_licenses.txt
+```
+
+#### Migrate Subscriptions (Contract Changed)
+Migrates users from an old subscription ID to a new one:
+```bash
+python3 ge_licenses.py --action migrate --project-id YOUR_PROJECT_ID --old-subscription-id OLD_SUB_ID --new-subscription-id NEW_SUB_ID --emails-file user_licenses.txt
 ```
 
 ---
@@ -88,15 +107,9 @@ python3 ge_licenses.py --project-id YOUR_PROJECT_ID retract --emails-file user_l
 
 The input file accepts one email address per line or the CSV format exported by the script:
 ```text
-user1@company.com
-user2@company.com
+email,license_config
+user1@company.com,projects/267339081837/locations/global/licenseConfigs/internal_gemini_ent_plus
+user2@company.com,N/A
 ```
 
 ---
-
-## Git Ignored Files (.gitignore)
-To prevent committing sensitive credential files or PII (user emails), the following files are ignored in the `.gitignore`:
-*   `service_account_key.json`
-*   `user_licenses.txt`
-*   `user_licenses.txt.bak`
-*   `__pycache__/`
